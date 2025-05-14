@@ -23,7 +23,7 @@ A Telegram bot that allows users to download YouTube videos and audio directly f
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/yt-downloader-python-telegram.git
+git clone https://github.com/akindu-k/yt-downloader-python-telegram.git
 cd yt-downloader-python-telegram
 ```
 
