@@ -163,78 +163,157 @@ async def download_video(url: str, quality: str, update: Update, context: Contex
     query = update.callback_query
     chat_id = update.effective_chat.id
     
-    # Set format based on quality
+    # Set format based on quality - with fallback options
     if quality == "high":
-        format_option = 'best[filesize<50M]'
+        # Try progressively lower quality options if high quality fails
+        format_options = [
+            'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best[ext=mp4]/best',
+            'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best[ext=mp4]/best'
+        ]
         quality_text = "high quality"
     else:  # medium
-        format_option = 'best[height<=480][filesize<50M]'
+        format_options = [
+            'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]/best',
+            'bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]/best[ext=mp4]/best'
+        ]
         quality_text = "medium quality"
     
     # Create a temporary filename
     temp_dir = os.path.join(TEMP_DOWNLOAD_DIR, f"tg_ytdl_{chat_id}")
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Download options
-    ydl_opts = {
-        'format': format_option,
-        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-        'progress_hooks': [lambda d: download_progress_hook(d, update, context)],
-    }
+    success = False
+    file_path = None
+    
+    # Try each format option until one works
+    for format_option in format_options:
+        if success:
+            break
+            
+        # Download options
+        ydl_opts = {
+            'format': format_option,
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'progress_hooks': [lambda d: download_progress_hook(d, update, context)],
+            'merge_output_format': 'mp4',
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
+            'noplaylist': True,
+        }
+        
+        try:
+            # Update status message
+            await query.edit_message_text(f"⬇️ Downloading {quality_text} video...")
+            
+            # Download the video
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+                
+                # If the file extension changed during download
+                if not os.path.exists(file_path):
+                    base_path = os.path.splitext(file_path)[0]
+                    for ext in ['mp4', 'mkv', 'webm']:
+                        possible_path = base_path + f".{ext}"
+                        if os.path.exists(possible_path):
+                            file_path = possible_path
+                            break
+                
+                # Check if file exists
+                if os.path.exists(file_path):
+                    success = True
+                    break
+                
+        except Exception as e:
+            logger.error(f"Error with format {format_option}: {e}")
+            # Continue to the next format option
+            continue
+    
+    # If all format options failed
+    if not success or not file_path or not os.path.exists(file_path):
+        # Try a last resort format
+        ydl_opts = {
+            'format': 'best/bestvideo+bestaudio',
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'progress_hooks': [lambda d: download_progress_hook(d, update, context)],
+        }
+        
+        try:
+            await query.edit_message_text(f"⬇️ Trying alternative download method...")
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+                
+                # If the file extension changed during download
+                if not os.path.exists(file_path):
+                    base_path = os.path.splitext(file_path)[0]
+                    for ext in ['mp4', 'mkv', 'webm']:
+                        possible_path = base_path + f".{ext}"
+                        if os.path.exists(possible_path):
+                            file_path = possible_path
+                            break
+                
+                if os.path.exists(file_path):
+                    success = True
+                
+        except Exception as e:
+            logger.error(f"Error with last resort format: {e}")
+            await query.edit_message_text("❌ Download failed. The video might be unavailable or restricted.")
+            return None
+    
+    # If we still don't have a file
+    if not success or not file_path or not os.path.exists(file_path):
+        await query.edit_message_text("❌ Download failed. File not found after multiple attempts.")
+        return None
+    
+    # Check file size
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    if file_size_mb > 50:
+        await query.edit_message_text(
+            f"⚠️ The video is too large ({file_size_mb:.1f} MB) to send via Telegram (limit: 50 MB).\n"
+            f"Please try a lower quality option."
+        )
+        try:
+            os.remove(file_path)
+        except:
+            pass
+        return None
+    
+    # Send the video file
+    await query.edit_message_text(f"📤 Uploading {quality_text} video to Telegram...")
     
     try:
-        # Update status message
-        await query.edit_message_text(f"⬇️ Downloading {quality_text} video...")
+        with open(file_path, 'rb') as video_file:
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=video_file,
+                caption=f"🎬 {info.get('title', 'YouTube Video')}",
+                supports_streaming=True,
+            )
         
-        # Download the video
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            
-            # If the file extension changed during download
-            if not os.path.exists(file_path):
-                for ext in ['mp4', 'mkv', 'webm']:
-                    possible_path = os.path.splitext(file_path)[0] + f".{ext}"
-                    if os.path.exists(possible_path):
-                        file_path = possible_path
-                        break
-            
-            # Check if file exists and is not too large
-            if not os.path.exists(file_path):
-                await query.edit_message_text("❌ Download failed. File not found.")
-                return None
-            
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            if file_size_mb > 50:
-                await query.edit_message_text(
-                    f"⚠️ The video is too large ({file_size_mb:.1f} MB) to send via Telegram (limit: 50 MB).\n"
-                    f"Please try a lower quality option."
-                )
-                os.remove(file_path)
-                return None
-            
-            # Send the video file
-            await query.edit_message_text(f"📤 Uploading {quality_text} video to Telegram...")
-            
-            with open(file_path, 'rb') as video_file:
-                await context.bot.send_video(
-                    chat_id=chat_id,
-                    video=video_file,
-                    caption=f"🎬 {info.get('title', 'YouTube Video')}",
-                    supports_streaming=True,
-                )
-            
-            await query.edit_message_text(f"✅ Video downloaded and sent successfully!")
-            
-            # Clean up
+        await query.edit_message_text(f"✅ Video downloaded and sent successfully!")
+        
+        # Clean up
+        try:
             os.remove(file_path)
-            return file_path
-            
+        except:
+            pass
+        return file_path
+    
     except Exception as e:
-        logger.error(f"Error downloading video: {e}")
-        await query.edit_message_text(f"❌ Download failed: {str(e)}")
+        logger.error(f"Error sending video: {e}")
+        await query.edit_message_text(f"❌ Failed to send the video: {str(e)}")
+        try:
+            os.remove(file_path)
+        except:
+            pass
         return None
 
 async def download_audio(url: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
@@ -246,7 +325,7 @@ async def download_audio(url: str, update: Update, context: ContextTypes.DEFAULT
     temp_dir = os.path.join(TEMP_DOWNLOAD_DIR, f"tg_ytdl_{chat_id}")
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Download options
+    # Download options - with fallback
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
@@ -258,6 +337,7 @@ async def download_audio(url: str, update: Update, context: ContextTypes.DEFAULT
         'quiet': True,
         'no_warnings': True,
         'progress_hooks': [lambda d: download_progress_hook(d, update, context)],
+        'noplaylist': True,
     }
     
     try:
@@ -269,7 +349,16 @@ async def download_audio(url: str, update: Update, context: ContextTypes.DEFAULT
             info = ydl.extract_info(url, download=True)
             file_path = os.path.splitext(ydl.prepare_filename(info))[0] + '.mp3'
             
-            # Check if file exists and is not too large
+            # Check if file exists
+            if not os.path.exists(file_path):
+                # Try alternative path
+                base_path = os.path.splitext(ydl.prepare_filename(info))[0]
+                for ext in ['mp3', 'm4a', 'ogg', 'opus']:
+                    possible_path = base_path + f".{ext}"
+                    if os.path.exists(possible_path):
+                        file_path = possible_path
+                        break
+            
             if not os.path.exists(file_path):
                 await query.edit_message_text("❌ Audio download failed. File not found.")
                 return None
@@ -296,7 +385,10 @@ async def download_audio(url: str, update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text("✅ Audio downloaded and sent successfully!")
             
             # Clean up
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except:
+                pass
             return file_path
             
     except Exception as e:
