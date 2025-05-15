@@ -64,7 +64,7 @@ BOT_TOKEN=your_bot_token_here
 
 Run the bot with the following command:
 ```bash
-python test.py
+python main.py
 ```
 
 ## Usage
